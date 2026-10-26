@@ -14,3 +14,7 @@ faiss-cpu>=1.8.0
 
 # Utilities
 python-dotenv>=1.0.0
+
+# UI
+gradio>=5.0.0
+

@@ -1,0 +1,21 @@
+# Ignore virtual environments
+.venv
+venv
+ENV/
+
+# Ignore local secrets and caches
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Ignore git and Gradio local state
+.git
+.gitignore
+.gradio/
+
+# Scratch & Jupyter notebooks if any
+*.ipynb
+scratch/
