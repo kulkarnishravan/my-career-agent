@@ -2,9 +2,13 @@ import os
 import re
 import json
 import html
+import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from dotenv import load_dotenv
+from pydantic import BaseModel
+from markdown_it import MarkdownIt
 import pypdf
 import gradio as gr
 from openai import OpenAI
@@ -33,6 +37,12 @@ DATA_DIR = Path(__file__).parent / "data"
 PDF_FILE = DATA_DIR / "Shravan Resume Rag feed.pdf"
 RESUME_DOWNLOAD_FILE = DATA_DIR / "Shravan Resume 2026.pdf"
 MAX_QUERY_CHARS = 250
+
+# JD Match limits & retrieval tuning
+MIN_JD_CHARS = 200
+MAX_JD_CHARS = 8000
+MAX_JD_LINE_QUERIES = 25
+JD_MATCH_MIN_COSINE = 0.40  # unrelated chunks score ~0.1-0.3, relevant ones 0.4+
 
 # Candidate contact details for feedback & direct queries
 contact_details_env = os.getenv("CONTACT_DETAILS", "").strip()
@@ -213,6 +223,162 @@ Please answer the question strictly based on the source material above."""
 
 
 # ------------------------------------------------------------------------------
+# 4b. JD Match: Retrieval, Structured Evaluation & Scoring
+# ------------------------------------------------------------------------------
+class Requirement(BaseModel):
+    skill: str
+    priority: Literal["must", "nice"]
+    status: Literal["met", "partial", "missing"]
+    evidence: str
+
+
+class JDMatch(BaseModel):
+    is_job_description: bool
+    role_title: str
+    requirements: list[Requirement]
+    fit_reasons: list[str]
+    gap_reasons: list[str]
+    missing_skills: list[str]
+    missing_experience: list[str]
+    summary: str
+
+
+NOT_A_JD_MESSAGE = (
+    "That doesn't look like a job description to me. Please paste the full JD "
+    "(role, responsibilities and requirements) and I'll match it against Shravan's resume."
+)
+
+WRONG_FIT_MESSAGE = (
+    "### 🎯 JD Match\n\n**🔴 Wrong fit**: nothing in Shravan's resume matches this job description."
+)
+
+
+def validate_jd(jd_text: str) -> list[str]:
+    """Returns a list of validation errors (empty if the JD is acceptable)."""
+    length = len((jd_text or "").strip())
+    if length < MIN_JD_CHARS:
+        return [f"Please paste the full job description (at least {MIN_JD_CHARS} characters; currently {length})."]
+    if length > MAX_JD_CHARS:
+        return [f"The job description is too long ({length} characters). Please trim it to {MAX_JD_CHARS} characters."]
+    return []
+
+
+def retrieve_jd_chunks(jd_text: str) -> list:
+    """
+    Returns every resume chunk above JD_MATCH_MIN_COSINE for the whole JD or any of its lines.
+    Line-level queries catch requirement-specific chunks that a single long-JD embedding dilutes.
+    """
+    lines = [l.strip() for l in re.split(r"\r?\n|[●•\uf0b7]", jd_text)]
+    queries = [jd_text] + [l for l in lines if len(l) >= 15][:MAX_JD_LINE_QUERIES]
+
+    total_chunks = vector_store.index.ntotal
+    matched = {}
+    for query in queries:
+        for doc, sq_l2_distance in vector_store.similarity_search_with_score(query, k=total_chunks):
+            # OpenAI embeddings are unit-length, so squared L2 distance = 2 - 2 * cosine
+            if 1 - sq_l2_distance / 2 >= JD_MATCH_MIN_COSINE:
+                matched.setdefault(doc.metadata.get("chunk_id"), doc)
+
+    return sorted(matched.values(), key=lambda d: d.metadata.get("chunk_id", 0))
+
+
+def evaluate_jd_match(jd_text: str, context_chunks: list) -> JDMatch:
+    """Asks GPT-4o for a strictly grounded, structured requirement-by-requirement JD evaluation."""
+    system_prompt = """You are a precise, factual recruiting analyst evaluating how well Shravan A. Kulkarni fits a job description.
+
+CRITICAL INSTRUCTIONS:
+1. First decide whether the pasted text is genuinely a job description. If not, set is_job_description to false and leave the other fields empty.
+2. Extract the key requirements from the JD (skills, technologies, years/type of experience, education, domain). Mark each as "must" (required/mandatory) or "nice" (preferred/bonus/plus).
+3. For each requirement, judge Shravan STRICTLY using ONLY the "Source Material" chunks:
+   - "met": a chunk clearly demonstrates it.
+   - "partial": a chunk shows related or adjacent experience, but not fully.
+   - "missing": NO chunk supports it.
+   Before marking anything "missing", scan EVERY chunk for the skill, a synonym, or a closely related term; if any chunk mentions it, it is at least "partial".
+   In "evidence", cite the supporting chunk (e.g. "Chunk 12: ...") or write "Not found in resume".
+4. Do NOT use outside knowledge, assumptions, or extrapolation. Never invent skills, numbers, or experience.
+5. fit_reasons: short bullets on why Shravan fits. gap_reasons: short bullets on where he falls short.
+6. missing_skills: short skill/tool names (1-3 words, e.g. "Kubernetes", "Go") for requirements marked "missing" or "partial". missing_experience: missing experience areas (seniority, domain, years). Never list something as missing that a chunk supports.
+7. summary: 2-3 sentences giving a balanced verdict.
+8. Always refer to the candidate as "Shravan", never as "the candidate"."""
+
+    context_text = "\n\n".join([
+        f"[Source Chunk {doc.metadata.get('chunk_id', idx + 1)}]:\n{doc.page_content}"
+        for idx, doc in enumerate(context_chunks)
+    ])
+
+    user_prompt = f"""--- SOURCE MATERIAL ---
+{context_text}
+
+--- JOB DESCRIPTION ---
+{jd_text}
+
+Evaluate Shravan's fit for this job description strictly based on the source material above."""
+
+    response = client.chat.completions.parse(
+        model="gpt-4o",
+        temperature=0.0,
+        response_format=JDMatch,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+    )
+    return response.choices[0].message.parsed
+
+
+def compute_match_score(requirements: list[Requirement]) -> int:
+    """Deterministic score: must-haves weigh 2x, partial matches earn half credit."""
+    weights = {"must": 2, "nice": 1}
+    credit = {"met": 1.0, "partial": 0.5, "missing": 0.0}
+    max_points = sum(weights[r.priority] for r in requirements)
+    if not max_points:
+        return 0
+    earned = sum(weights[r.priority] * credit[r.status] for r in requirements)
+    return round(earned / max_points * 100)
+
+
+def format_jd_match_markdown(result: JDMatch, score: int) -> str:
+    """Renders the JD Match result as a chat-friendly markdown answer."""
+    if score >= 75:
+        band = "🟢 Strong fit"
+    elif score >= 50:
+        band = "🟡 Moderate fit"
+    else:
+        band = "🔴 Weak fit"
+
+    def bullets(items):
+        return "\n".join(f"- {item}" for item in items)
+
+    def cell(text):
+        return text.replace("|", "\\|").replace("\n", " ")
+
+    parts = [
+        f"### 🎯 JD Match: {result.role_title or 'Job Description'}",
+        f"**Match Score: {score}/100** {band}",
+        f"> {result.summary}",
+    ]
+    if result.fit_reasons:
+        parts.append(f"**✅ Why Shravan fits**\n{bullets(result.fit_reasons)}")
+    if result.gap_reasons:
+        parts.append(f"**⚠️ Where it falls short**\n{bullets(result.gap_reasons)}")
+    if result.missing_skills:
+        parts.append("**🧩 Missing skills:** " + " · ".join(f"`{s}`" for s in result.missing_skills))
+    if result.missing_experience:
+        parts.append(f"**📉 Missing experience**\n{bullets(result.missing_experience)}")
+    if result.requirements:
+        status_icon = {"met": "✅ Met", "partial": "🟡 Partial", "missing": "❌ Missing"}
+        rows = "\n".join(
+            f"| {cell(r.skill)} | {'Must' if r.priority == 'must' else 'Nice'} | {status_icon[r.status]} | {cell(r.evidence)} |"
+            for r in result.requirements
+        )
+        parts.append(
+            "**Requirement breakdown**\n\n"
+            "| Requirement | Priority | Status | Evidence |\n|---|---|---|---|\n" + rows
+        )
+    return "\n\n".join(parts)
+
+
+# ------------------------------------------------------------------------------
 # 5. Dynamic Stylish Pipeline Status (Zero Numbers)
 # ------------------------------------------------------------------------------
 def render_pipeline_status(step: str, title: str, subtitle: str) -> str:
@@ -358,6 +524,14 @@ def render_loader(label: str) -> str:
 # ------------------------------------------------------------------------------
 # 6. Chatbot Handler for Gradio
 # ------------------------------------------------------------------------------
+def format_sources(docs: list) -> str:
+    """Markdown listing of retrieved chunks for the Developer Mode sources panel."""
+    return "\n\n---\n\n".join([
+        f"**Source Chunk {doc.metadata.get('chunk_id', idx + 1)}** *(File: `{doc.metadata.get('source', PDF_FILE.name)}`)*:\n\n{doc.page_content}"
+        for idx, doc in enumerate(docs)
+    ])
+
+
 def chat_handler(user_message, history, top_k=4):
     if history is None:
         history = []
@@ -420,10 +594,7 @@ def chat_handler(user_message, history, top_k=4):
         yield history, status_html, "*No chunks retrieved from vector database.*"
         return
 
-    formatted_sources = "\n\n---\n\n".join([
-        f"**Source Chunk {doc.metadata.get('chunk_id', idx + 1)}** *(File: `{doc.metadata.get('source', PDF_FILE.name)}`)*:\n\n{doc.page_content}"
-        for idx, doc in enumerate(retrieved_docs)
-    ])
+    formatted_sources = format_sources(retrieved_docs)
 
     # 3. Grounded Answer Generation
     status_html = render_pipeline_status("synthesis", "Grounded Synthesis", "Synthesizing answer strictly under source constraints...")
@@ -433,6 +604,59 @@ def chat_handler(user_message, history, top_k=4):
 
     history = base_history + [{"role": "assistant", "content": answer}]
     status_html = render_pipeline_status("complete", "Complete & Grounded", "Answer verified strictly within source material.")
+    yield history, status_html, formatted_sources
+
+
+def jd_match_handler(jd_text, history):
+    """Retrieves every matching chunk for the JD, evaluates fit, and yields (history, status, sources)."""
+    history = history or []
+    jd_text = jd_text.strip()
+    base_history = history + [{"role": "user", "content": f"🎯 JD Match requested ({len(jd_text)} chars)"}]
+
+    def pending(label):
+        return base_history + [{"role": "assistant", "content": render_loader(label)}]
+
+    try:
+        # 1. Retrieve all chunks above the relevance threshold
+        status_html = render_pipeline_status("retrieval", "JD Context Retrieval", "Fetching every resume chunk relevant to the JD...")
+        yield pending("Searching the resume"), status_html, "*Retrieving relevant chunks...*"
+
+        retrieved_docs = retrieve_jd_chunks(jd_text)
+        if not retrieved_docs:
+            send_jd_match_email(jd_text, WRONG_FIT_MESSAGE, "JD Match: Wrong fit")
+            history = base_history + [{"role": "assistant", "content": WRONG_FIT_MESSAGE}]
+            status_html = render_pipeline_status("complete", "Wrong Fit", "No resume chunks matched the job description.")
+            yield history, status_html, "*No chunks matched the job description.*"
+            return
+
+        formatted_sources = format_sources(retrieved_docs)
+
+        # 2. Structured, grounded evaluation + deterministic score
+        status_html = render_pipeline_status("synthesis", "JD Match Synthesis", f"Scoring the JD against {len(retrieved_docs)} retrieved chunks...")
+        yield pending("Matching JD to resume"), status_html, formatted_sources
+
+        result = evaluate_jd_match(jd_text, retrieved_docs)
+        if not result.is_job_description:
+            history = base_history + [{"role": "assistant", "content": NOT_A_JD_MESSAGE}]
+            status_html = render_pipeline_status("deflected", "Not a Job Description", "Pasted text was not recognised as a JD.")
+            yield history, status_html, formatted_sources
+            return
+
+        score = compute_match_score(result.requirements)
+        answer = format_jd_match_markdown(result, score)
+        send_jd_match_email(jd_text, answer, f"JD Match: {result.role_title or 'Job Description'} ({score}/100)")
+    except Exception as exc:
+        print(f"[JD MATCH] Evaluation failed: {type(exc).__name__}: {exc}")
+        history = base_history + [{
+            "role": "assistant",
+            "content": "Sorry, I couldn't complete the JD match right now. Please try again in a moment."
+        }]
+        status_html = render_pipeline_status("deflected", "JD Match Failed", "An error occurred while evaluating the JD.")
+        yield history, status_html, "*JD match failed.*"
+        return
+
+    history = base_history + [{"role": "assistant", "content": answer}]
+    status_html = render_pipeline_status("complete", "JD Match Complete", "JD scored strictly against retrieved resume chunks.")
     yield history, status_html, formatted_sources
 
 
@@ -490,14 +714,23 @@ def send_feedback_email(name: str, contact: str, email: str, feedback: str) -> t
         f'{html.escape(feedback)}</div></div>'
     )
 
+    reply_to = ReplyTo(email, name) if email else None
+    return send_email_to_shravan(f"Resume Chatbot feedback from {name}", body_html, reply_to)
+
+
+def send_email_to_shravan(subject: str, body_html: str, reply_to: ReplyTo | None = None) -> tuple[bool, str]:
+    """Sends an HTML e-mail to Shravan via SendGrid. Returns (success, error_detail)."""
+    if not SENDGRID_API_KEY:
+        return False, "SENDGRID_API_KEY is not configured"
+
     message = Mail(
         from_email=FEEDBACK_FROM_EMAIL,
         to_emails=FEEDBACK_TO_EMAIL,
-        subject=f"Resume Chatbot feedback from {name}",
+        subject=subject,
         html_content=body_html,
     )
-    if email:
-        message.reply_to = ReplyTo(email, name)
+    if reply_to:
+        message.reply_to = reply_to
 
     try:
         response = SendGridAPIClient(SENDGRID_API_KEY).send(message)
@@ -506,6 +739,39 @@ def send_feedback_email(name: str, contact: str, email: str, feedback: str) -> t
     if 200 <= response.status_code < 300:
         return True, ""
     return False, f"HTTP {response.status_code}: {response.body}"
+
+
+# Raw HTML disabled so pasted JD/LLM text can't inject markup into the e-mail
+email_markdown = MarkdownIt("commonmark", {"html": False}).enable("table")
+EMAIL_TABLE_STYLES = {
+    "<table>": '<table style="border-collapse:collapse;width:100%;font-size:13px;">',
+    "<th>": '<th style="border:1px solid #e2e8f0;background:#f1f5f9;padding:6px;text-align:left;">',
+    "<td>": '<td style="border:1px solid #e2e8f0;padding:6px;vertical-align:top;">',
+}
+
+
+def send_jd_match_email(jd_text: str, result_markdown: str, subject: str) -> None:
+    """E-mails the JD Match result plus the original JD to Shravan in a background thread."""
+    result_html = email_markdown.render(result_markdown)
+    for tag, styled in EMAIL_TABLE_STYLES.items():
+        result_html = result_html.replace(tag, styled)
+
+    body_html = (
+        f'<div style="font-family:Arial,sans-serif;font-size:14px;color:#0f172a;">'
+        f'<h3 style="color:#4338ca;margin:0 0 12px 0;">New JD Match from the Resume Chatbot</h3>'
+        f'<p style="color:#64748b;margin:0 0 12px 0;">Run at {datetime.now().strftime("%d %b %Y, %H:%M")}</p>'
+        f'{result_html}'
+        f'<p style="margin:20px 0 4px 0;"><b>Job Description:</b></p>'
+        f'<div style="white-space:pre-wrap;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;">'
+        f'{html.escape(jd_text)}</div></div>'
+    )
+
+    def _send():
+        sent, error_detail = send_email_to_shravan(subject, body_html)
+        if not sent:
+            print(f"[JD MATCH] E-mail delivery failed: {error_detail}")
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 # ------------------------------------------------------------------------------
@@ -1537,7 +1803,8 @@ button:disabled, .gr-button:disabled {
 }
 
 /* ── Feedback Dialog: fixed overlay with a centred card ── */
-#feedback-modal {
+#feedback-modal,
+#jd-modal {
     position: fixed !important;
     inset: 0 !important;
     z-index: 1000 !important;
@@ -1555,20 +1822,24 @@ button:disabled, .gr-button:disabled {
     box-shadow: none !important;
 }
 
-#feedback-modal:not(.hide):not(.hidden) {
+#feedback-modal:not(.hide):not(.hidden),
+#jd-modal:not(.hide):not(.hidden) {
     display: flex !important;
 }
 
 /* Blur the page itself while the dialog is open (backdrop-filter alone is unreliable over glass panels) */
 .gradio-container:has(#feedback-modal:not(.hide):not(.hidden)) .header-row,
-.gradio-container:has(#feedback-modal:not(.hide):not(.hidden)) .main-content-row {
+.gradio-container:has(#jd-modal:not(.hide):not(.hidden)) .header-row,
+.gradio-container:has(#feedback-modal:not(.hide):not(.hidden)) .main-content-row,
+.gradio-container:has(#jd-modal:not(.hide):not(.hidden)) .main-content-row {
     filter: blur(6px) !important;
     pointer-events: none !important;
     user-select: none !important;
     transition: filter 0.2s ease !important;
 }
 
-#feedback-dialog {
+#feedback-dialog,
+#jd-dialog {
     width: 100% !important;
     max-width: 420px !important;
     max-height: 90vh !important;
@@ -1589,9 +1860,13 @@ button:disabled, .gr-button:disabled {
 
 /* Stack every field vertically at full width; strip the inherited glass-card styling */
 #feedback-dialog .form,
+#jd-dialog .form,
 #feedback-dialog .block,
+#jd-dialog .block,
 #feedback-dialog .gradio-row,
-#feedback-dialog .fb-actions {
+#jd-dialog .gradio-row,
+#feedback-dialog .fb-actions,
+#jd-dialog .fb-actions {
     background: transparent !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
@@ -1603,7 +1878,8 @@ button:disabled, .gr-button:disabled {
     margin: 0 !important;
 }
 
-#feedback-dialog .form {
+#feedback-dialog .form,
+#jd-dialog .form {
     display: flex !important;
     flex-direction: column !important;
     flex-wrap: nowrap !important;
@@ -1611,20 +1887,25 @@ button:disabled, .gr-button:disabled {
 }
 
 #feedback-dialog .form > *,
-#feedback-dialog > .block {
+#jd-dialog .form > *,
+#feedback-dialog > .block,
+#jd-dialog > .block {
     width: 100% !important;
     min-width: 0 !important;
     flex: 0 0 auto !important;
 }
 
-#feedback-dialog h3 {
+#feedback-dialog h3,
+#jd-dialog h3 {
     margin: 0 0 2px 0 !important;
     font-size: 0.95rem !important;
     color: #4338ca !important;
 }
 
 #feedback-dialog label span,
-#feedback-dialog [data-testid="block-info"] {
+#jd-dialog label span,
+#feedback-dialog [data-testid="block-info"],
+#jd-dialog [data-testid="block-info"] {
     font-size: 0.74rem !important;
     font-weight: 600 !important;
     color: #475569 !important;
@@ -1632,20 +1913,25 @@ button:disabled, .gr-button:disabled {
 }
 
 #feedback-dialog input,
-#feedback-dialog textarea {
+#jd-dialog input,
+#feedback-dialog textarea,
+#jd-dialog textarea {
     font-size: 0.8rem !important;
     line-height: 1.3 !important;
     padding: 5px 10px !important;
     border-radius: 8px !important;
 }
 
-#feedback-dialog input {
+#feedback-dialog input,
+#jd-dialog input {
     height: 30px !important;
     min-height: 30px !important;
 }
 
 #feedback-dialog input::placeholder,
-#feedback-dialog textarea::placeholder {
+#jd-dialog input::placeholder,
+#feedback-dialog textarea::placeholder,
+#jd-dialog textarea::placeholder {
     font-size: 0.78rem !important;
 }
 
@@ -1659,21 +1945,26 @@ button:disabled, .gr-button:disabled {
 .fb-error,
 .fb-error *,
 #feedback-dialog .fb-error-list,
-#feedback-dialog .fb-error-list li {
+#jd-dialog .fb-error-list,
+#feedback-dialog .fb-error-list li,
+#jd-dialog .fb-error-list li {
     color: #dc2626 !important;
     font-size: 0.74rem !important;
 }
 
-#feedback-dialog .fb-error-list {
+#feedback-dialog .fb-error-list,
+#jd-dialog .fb-error-list {
     margin: 0 !important;
     padding-left: 16px !important;
 }
 
-#feedback-dialog .fb-error-list li::marker {
+#feedback-dialog .fb-error-list li::marker,
+#jd-dialog .fb-error-list li::marker {
     color: #dc2626 !important;
 }
 
-#feedback-dialog .fb-actions {
+#feedback-dialog .fb-actions,
+#jd-dialog .fb-actions {
     display: flex !important;
     flex-direction: row !important;
     justify-content: flex-end !important;
@@ -1681,7 +1972,8 @@ button:disabled, .gr-button:disabled {
     margin-top: 4px !important;
 }
 
-#feedback-dialog .fb-actions button {
+#feedback-dialog .fb-actions button,
+#jd-dialog .fb-actions button {
     flex: 0 0 auto !important;
     width: auto !important;
     min-width: 0 !important;
@@ -1689,6 +1981,11 @@ button:disabled, .gr-button:disabled {
     padding: 0 14px !important;
     font-size: 0.76rem !important;
     border-radius: 8px !important;
+}
+
+/* JD dialog: wider to fit a pasted job description */
+#jd-dialog {
+    max-width: 640px !important;
 }
 """
 
@@ -1810,6 +2107,22 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
                 fb_cancel = gr.Button("Cancel", variant="secondary", size="sm", scale=0, min_width=0)
                 fb_submit = gr.Button("Submit Feedback", variant="primary", size="sm", scale=0, min_width=0)
 
+    # JD Match dialog: same fixed-overlay pattern as the feedback dialog
+    with gr.Column(visible=False, elem_id="jd-modal") as jd_modal:
+        with gr.Column(elem_id="jd-dialog"):
+            gr.Markdown("### 🎯 Match a Job Description")
+            jd_text = gr.Textbox(
+                label="Job Description *",
+                placeholder="Paste the full job description (role, responsibilities, requirements)...",
+                lines=12,
+                max_lines=20
+            )
+            gr.Markdown(f"*Between {MIN_JD_CHARS} and {MAX_JD_CHARS} characters.*", elem_classes=["fb-hint"])
+            jd_error = gr.HTML("", elem_classes=["fb-error"])
+            with gr.Row(elem_classes=["fb-actions"]):
+                jd_cancel = gr.Button("Cancel", variant="secondary", size="sm", scale=0, min_width=0)
+                jd_submit = gr.Button("Analyze Match", variant="primary", size="sm", scale=0, min_width=0)
+
     # Event handlers
     def on_mode_change(mode):
         is_developer = (mode == "Developer Mode")
@@ -1884,7 +2197,6 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
         return _handler
 
     quick_options_map = [
-        (opt_jd_match, "Please evaluate Shravan's skills, qualifications, and experience for job role suitability (JD Match analysis)."),
         (opt_agentic, "What experience does Shravan have with Agentic AI and multi-agent frameworks?"),
         (opt_skills, "What are his core technical skills in web development and frontend architecture?"),
         (opt_edu, "What is Shravan's educational background and degrees?")
@@ -1892,7 +2204,7 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
     # Recruiter Mode buttons reuse the same prompts
     quick_options_map += [
         (rec_btn, prompt) for rec_btn, (_, prompt) in zip(
-            [rec_jd_match, rec_agentic, rec_skills, rec_edu], quick_options_map
+            [rec_agentic, rec_skills, rec_edu], quick_options_map
         )
     ]
 
@@ -1949,6 +2261,40 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
         fn=submit_feedback,
         inputs=[fb_name, fb_contact, fb_email, fb_text],
         outputs=feedback_outputs,
+        show_progress="hidden"
+    )
+
+    # JD Match dialog handlers
+    def open_jd_match():
+        return gr.update(visible=True), ""
+
+    def close_jd_match():
+        return gr.update(visible=False), "", ""
+
+    def run_jd_match(jd, history):
+        errors = validate_jd(jd)
+        if errors:
+            error_html = '<ul class="fb-error-list">' + "".join(f"<li>{e}</li>" for e in errors) + "</ul>"
+            yield gr.skip(), gr.skip(), error_html, gr.skip(), gr.skip(), gr.skip()
+            return
+
+        # Close the dialog, then stream the pipeline into the chat
+        first = True
+        for h, status, sources in jd_match_handler(jd, history):
+            if first:
+                yield *close_jd_match(), h, status, sources
+                first = False
+            else:
+                yield gr.skip(), gr.skip(), gr.skip(), h, status, sources
+
+    for btn in (rec_jd_match, opt_jd_match):
+        btn.click(fn=open_jd_match, outputs=[jd_modal, jd_error], show_progress="hidden")
+
+    jd_cancel.click(fn=close_jd_match, outputs=[jd_modal, jd_text, jd_error], show_progress="hidden")
+    jd_submit.click(
+        fn=run_jd_match,
+        inputs=[jd_text, chatbot],
+        outputs=[jd_modal, jd_text, jd_error, chatbot, status_box, sources_box],
         show_progress="hidden"
     )
 
