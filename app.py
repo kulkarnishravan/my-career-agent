@@ -55,17 +55,23 @@ NO_INFO_FALLBACK_MESSAGE = (
 # ------------------------------------------------------------------------------
 # 2. Vector Store Initialization (Load or Auto-Build)
 # ------------------------------------------------------------------------------
-def get_or_create_vector_store():
-    """Loads existing FAISS index or creates a new one from the PDF resume."""
-    if INDEX_DIR.exists() and (INDEX_DIR / "index.faiss").exists():
-        print(f"Loading existing FAISS index from {INDEX_DIR}...")
-        return FAISS.load_local(
-            str(INDEX_DIR),
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
+def get_or_create_vector_store(force_rebuild: bool = False):
+    """Loads existing FAISS index or creates/rebuilds if the PDF has been updated."""
+    index_file = INDEX_DIR / "index.faiss"
 
-    print(f"FAISS index not found. Building index from {PDF_FILE}...")
+    # Check if index exists and is up to date with the PDF file
+    if not force_rebuild and INDEX_DIR.exists() and index_file.exists():
+        if PDF_FILE.exists() and PDF_FILE.stat().st_mtime > index_file.stat().st_mtime:
+            print(f"PDF resume ({PDF_FILE.name}) was updated after index creation. Auto-rebuilding FAISS index...")
+        else:
+            print(f"Loading existing FAISS index from {INDEX_DIR}...")
+            return FAISS.load_local(
+                str(INDEX_DIR),
+                embeddings,
+                allow_dangerous_deserialization=True
+            )
+
+    print(f"Building/rebuilding FAISS index from {PDF_FILE}...")
     if not PDF_FILE.exists():
         raise FileNotFoundError(f"Resume PDF not found at {PDF_FILE}")
 
@@ -124,6 +130,8 @@ CLASSIFY AS RELEVANT (is_relevant: true):
 - Certifications, licenses, training, awards, or achievements.
 - Fit/suitability for specific job roles, positions, or hiring requirements.
 - Resume overview, summary, or requests to review/download credentials.
+- Salary Expectations, or Salary Range, relocation, hybrid/remote policy.
+- Any requests for contact details, phone number, email, etc.
 
 CLASSIFY AS IRRELEVANT (is_relevant: false):
 - Private personal life (e.g., dating, marital status, relationships, religion, politics).
@@ -175,9 +183,10 @@ def generate_grounded_answer(query: str, context_chunks: list) -> str:
 CRITICAL INSTRUCTIONS:
 1. Answer the question STRICTLY using ONLY the information provided in the "Source Material" below.
 2. Do NOT use any outside knowledge, assumptions, extrapolation, or imagination.
-3. If the answer cannot be fully deduced from the provided source material, you MUST state:
+3. If the source material mentions relevant context, policies, preferences, or statements related to the topic (such as salary expectations, location preferences, work arrangements, or experience), clearly explain what is stated in the documents.
+4. ONLY if the provided source material has NO relevant information whatsoever on the asked topic, you MUST state:
    "{NO_INFO_FALLBACK_MESSAGE}"
-4. Do not speculate or invent qualifications or details."""
+5. Do not speculate or invent numbers, qualifications, or details not present in the text."""
 
     context_text = "\n\n".join([
         f"[Source Chunk {doc.metadata.get('chunk_id', idx + 1)}]:\n{doc.page_content}"
@@ -506,6 +515,8 @@ light_theme = gr.themes.Soft(
     primary_hue="indigo",
     secondary_hue="cyan",
     neutral_hue="slate",
+    text_size=gr.themes.sizes.text_sm,
+    spacing_size=gr.themes.sizes.spacing_sm,
     font=[gr.themes.GoogleFont("Inter"), "system-ui", "-apple-system", "sans-serif"],
 ).set(
     body_background_fill="transparent",
@@ -516,6 +527,7 @@ light_theme = gr.themes.Soft(
     button_primary_background_fill="linear-gradient(135deg, #4f46e5 0%, #0ea5e9 100%)",
     button_primary_text_color="#ffffff",
     input_background_fill="rgba(255, 255, 255, 0.95)",
+    chatbot_text_size="0.72rem",
 )
 
 custom_css = """
@@ -555,7 +567,16 @@ custom_css = """
     box-shadow: 0 14px 36px -6px rgba(79, 70, 229, 0.08), 0 4px 10px rgba(15, 23, 42, 0.03) !important;
 }
 
-/* ── Chatbot Glass Canvas & Elegant Conversation Typography ── */
+/* ── Chatbot Glass Canvas & Sleek Compact Conversation Typography ── */
+:root,
+.gradio-container,
+.chatbot,
+#main-chatbot,
+[data-testid="chatbot"] {
+    --chatbot-text-size: 0.72rem !important;
+}
+
+#main-chatbot,
 .chatbot {
     background: rgba(255, 255, 255, 0.65) !important;
     backdrop-filter: blur(16px) !important;
@@ -565,61 +586,179 @@ custom_css = """
     font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
 }
 
-/* Conversation message text: compact, elegant font-size and smooth line-height */
-.chatbot .message,
-.chatbot .message-wrap,
-.chatbot [data-testid="user"],
-.chatbot [data-testid="bot"],
-.chatbot .user,
+/* ── Clean Single Speech Bubble Layout (Eliminates Box-in-Box Nesting) ── */
+#main-chatbot [class*="bubble-wrap"],
+.chatbot [class*="bubble-wrap"],
+#main-chatbot .bubble-wrap,
+.chatbot .bubble-wrap,
+#main-chatbot [class*="panel-wrap"],
+.chatbot [class*="panel-wrap"] {
+    padding: 4px 6px !important;
+    padding-top: 4px !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* Strip borders, backgrounds, and shadows from all outer rows and wrappers (Removes outermost box) */
+#main-chatbot .bubble,
+.chatbot .bubble,
+#main-chatbot [class*="bubble"],
+.chatbot [class*="bubble"],
+#main-chatbot .user-row,
+.chatbot .user-row,
+#main-chatbot .bot-row,
+.chatbot .bot-row,
+#main-chatbot [class*="user-row"],
+.chatbot [class*="user-row"],
+#main-chatbot [class*="bot-row"],
+.chatbot [class*="bot-row"],
+#main-chatbot .message-row,
+.chatbot .message-row,
+#main-chatbot [class*="message-row"],
+.chatbot [class*="message-row"],
+#main-chatbot .message-bubble-border,
+.chatbot .message-bubble-border,
+#main-chatbot [class*="message-bubble-border"],
+.chatbot [class*="message-bubble-border"],
+#main-chatbot .panel,
+.chatbot .panel,
+#main-chatbot [class*="panel"],
+.chatbot [class*="panel"],
+#main-chatbot .bot,
 .chatbot .bot,
-.chatbot .prose {
-    font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-    font-size: 0.86rem !important;
-    line-height: 1.54 !important;
-    letter-spacing: -0.012em !important;
+#main-chatbot .user,
+.chatbot .user,
+#main-chatbot .message,
+.chatbot .message,
+#main-chatbot .bot.message,
+.chatbot .bot.message,
+#main-chatbot .user.message,
+.chatbot .user.message,
+#main-chatbot .message.bot,
+.chatbot .message.bot,
+#main-chatbot .message.user,
+.chatbot .message.user,
+#main-chatbot [class*="message"],
+.chatbot [class*="message"],
+#main-chatbot [class*="bot"],
+.chatbot [class*="bot"],
+#main-chatbot [class*="user"],
+.chatbot [class*="user"] {
+    background: transparent !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
 }
 
-.chatbot .message p,
-.chatbot .message li,
-.chatbot .message span,
-.chatbot .prose p,
-.chatbot .prose li,
-.chatbot .prose span,
-.chatbot [data-testid="user"] p,
-.chatbot [data-testid="bot"] p {
-    font-size: 0.86rem !important;
-    line-height: 1.54 !important;
-    letter-spacing: -0.012em !important;
+/* Inner content elements must have no background or borders */
+#main-chatbot .message-content,
+.chatbot .message-content,
+#main-chatbot [class*="message-content"],
+.chatbot [class*="message-content"],
+#main-chatbot .prose,
+.chatbot .prose,
+#main-chatbot [class*="prose"],
+.chatbot [class*="prose"],
+#main-chatbot .flex-wrap,
+.chatbot .flex-wrap,
+#main-chatbot [class*="flex-wrap"],
+.chatbot [class*="flex-wrap"] {
+    background: transparent !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    min-height: 0 !important;
+    height: auto !important;
 }
 
-.chatbot .prose h1, .chatbot .message h1 { font-size: 1.05rem !important; font-weight: 700 !important; margin: 4px 0 !important; }
-.chatbot .prose h2, .chatbot .message h2 { font-size: 0.96rem !important; font-weight: 600 !important; margin: 4px 0 !important; }
-.chatbot .prose h3, .chatbot .message h3 { font-size: 0.90rem !important; font-weight: 600 !important; margin: 3px 0 !important; }
-.chatbot .prose ul, .chatbot .prose ol, .chatbot .message ul, .chatbot .message ol {
-    margin: 4px 0 !important;
-    padding-left: 18px !important;
+/* ── SINGLE ELEGANT BOT RESPONSE BOX (THE ONLY CARD) ── */
+#main-chatbot [data-testid="bot"],
+.chatbot [data-testid="bot"] {
+    background: rgba(255, 255, 255, 0.95) !important;
+    color: #0f172a !important;
+    border: 1px solid rgba(226, 232, 240, 0.95) !important;
+    outline: none !important;
+    border-radius: 12px 12px 12px 2px !important;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04) !important;
+    font-weight: 400 !important;
+    padding: 6px 12px !important;
+    max-width: 90% !important;
+    width: fit-content !important;
+    margin: 2px 0 !important;
 }
 
-.chatbot .user, .chatbot [data-testid="user"] {
+/* ── SINGLE ELEGANT USER RESPONSE BOX (THE ONLY CARD) ── */
+#main-chatbot [data-testid="user"],
+.chatbot [data-testid="user"] {
     background: linear-gradient(135deg, #4f46e5 0%, #0ea5e9 100%) !important;
     color: #ffffff !important;
     border: none !important;
-    border-radius: 18px 18px 4px 18px !important;
-    box-shadow: 0 4px 14px rgba(79, 70, 229, 0.25) !important;
+    outline: none !important;
+    border-radius: 12px 12px 2px 12px !important;
+    box-shadow: 0 4px 14px rgba(79, 70, 229, 0.22) !important;
     font-weight: 450 !important;
+    padding: 6px 12px !important;
+    max-width: 90% !important;
+    width: fit-content !important;
+    margin: 2px 0 !important;
 }
 
-.chatbot .user p, .chatbot [data-testid="user"] * {
+#main-chatbot [data-testid="user"] p,
+.chatbot [data-testid="user"] p,
+#main-chatbot [data-testid="user"] *,
+.chatbot [data-testid="user"] * {
     color: #ffffff !important;
 }
 
-.chatbot .bot, .chatbot [data-testid="bot"] {
-    background: rgba(255, 255, 255, 0.92) !important;
+#main-chatbot [data-testid="bot"] p,
+.chatbot [data-testid="bot"] p,
+#main-chatbot [data-testid="bot"] *,
+.chatbot [data-testid="bot"] * {
     color: #0f172a !important;
-    border: 1px solid rgba(226, 232, 240, 0.9) !important;
-    border-radius: 18px 18px 18px 4px !important;
-    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03) !important;
-    font-weight: 400 !important;
+}
+
+/* Comprehensive font size reduction for conversation area */
+#main-chatbot,
+#main-chatbot *,
+.chatbot,
+.chatbot *,
+#main-chatbot [class*="prose"] *,
+.chatbot [class*="prose"] *,
+#main-chatbot [class*="message"] *,
+.chatbot [class*="message"] * {
+    font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    font-size: 0.72rem !important;
+    line-height: 1.40 !important;
+}
+
+#main-chatbot p,
+.chatbot p,
+#main-chatbot [class*="prose"] p,
+.chatbot [class*="prose"] p,
+#main-chatbot li,
+.chatbot li,
+#main-chatbot span,
+.chatbot span {
+    margin: 1px 0 !important;
+    font-size: 0.72rem !important;
+    line-height: 1.36 !important;
+}
+
+#main-chatbot .prose h1, .chatbot .message h1 { font-size: 0.88rem !important; font-weight: 700 !important; margin: 3px 0 !important; }
+#main-chatbot .prose h2, .chatbot .message h2 { font-size: 0.82rem !important; font-weight: 600 !important; margin: 2px 0 !important; }
+#main-chatbot .prose h3, .chatbot .message h3 { font-size: 0.78rem !important; font-weight: 600 !important; margin: 2px 0 !important; }
+#main-chatbot .prose ul, #main-chatbot .prose ol, .chatbot .message ul, .chatbot .message ol {
+    margin: 2px 0 !important;
+    padding-left: 14px !important;
+}
+#main-chatbot .prose code, .chatbot .message code {
+    font-size: 0.68rem !important;
+    padding: 1px 4px !important;
 }
 
 /* ── Clean Glass Input & Textarea ── */
@@ -1025,31 +1164,39 @@ button.secondary:hover, .gr-button-secondary:hover {
     50%      { opacity: 1; }
 }
 
-/* Strip the white bot bubble so only the loader shows */
-.chatbot .message:has(.rag-loader),
-.chatbot .bot:has(.rag-loader),
-.chatbot [data-testid="bot"]:has(.rag-loader) {
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    padding: 2px 4px !important;
+/* Progress bar loader: neatly contained within the card */
+#main-chatbot [data-testid="bot"]:has(.rag-loader),
+.chatbot [data-testid="bot"]:has(.rag-loader),
+#main-chatbot .bot:has(.rag-loader),
+.chatbot .bot:has(.rag-loader) {
+    width: 220px !important;
+    min-width: 220px !important;
+    max-width: 220px !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+    padding: 7px 12px 8px 12px !important;
 }
 
 .rag-loader {
     display: flex;
     flex-direction: column;
-    gap: 7px;
-    width: 220px;
-    padding: 2px 0;
+    gap: 6px;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    padding: 0 !important;
 }
 
 .rag-loader-track {
     position: relative;
     height: 4px;
-    overflow: hidden;
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow: hidden !important;
     border-radius: 9999px;
-    background: #0b1020;
-    box-shadow: inset 0 0 0 1px rgba(99, 102, 241, 0.25);
+    background: rgba(99, 102, 241, 0.15);
+    box-shadow: inset 0 0 0 1px rgba(99, 102, 241, 0.2);
+    box-sizing: border-box !important;
 }
 
 .rag-loader-glow {
@@ -1060,13 +1207,13 @@ button.secondary:hover, .gr-button-secondary:hover {
     width: 45%;
     border-radius: 9999px;
     background: linear-gradient(90deg, transparent 0%, #3b82f6 25%, #8b5cf6 75%, transparent 100%);
-    box-shadow: 0 0 12px 1px rgba(99, 102, 241, 0.75), 0 0 24px 2px rgba(139, 92, 246, 0.4);
+    box-shadow: 0 0 10px 1px rgba(99, 102, 241, 0.6);
     animation: rag-sweep 1.5s cubic-bezier(0.45, 0.05, 0.35, 1) infinite;
 }
 
 .rag-loader-label {
-    font-size: 0.72rem;
-    font-weight: 500;
+    font-size: 0.70rem;
+    font-weight: 600;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     background: linear-gradient(90deg, #3b82f6, #8b5cf6);
@@ -1074,6 +1221,9 @@ button.secondary:hover, .gr-button-secondary:hover {
     background-clip: text;
     -webkit-text-fill-color: transparent;
     animation: rag-breathe 1.8s ease-in-out infinite;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1085,11 +1235,11 @@ button.secondary:hover, .gr-button-secondary:hover {
 .query-box-card {
     background: #f4f6fb !important;
     border: 1px solid #e2e8f0 !important;
-    border-radius: 20px !important;
-    padding: 10px 14px 8px 14px !important;
+    border-radius: 16px !important;
+    padding: 6px 10px 5px 10px !important;
     box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.05), 0 2px 6px -1px rgba(15, 23, 42, 0.03) !important;
     margin-top: 0 !important;
-    gap: 6px !important;
+    gap: 4px !important;
     display: flex !important;
     flex-direction: column !important;
     width: 100% !important;
@@ -1117,8 +1267,8 @@ button.secondary:hover, .gr-button-secondary:hover {
     display: flex !important;
     flex-direction: row !important;
     flex-wrap: nowrap !important;
-    align-items: center !important;
-    gap: 10px !important;
+    align-items: flex-end !important;
+    gap: 8px !important;
     width: 100% !important;
 }
 
@@ -1139,27 +1289,32 @@ button.secondary:hover, .gr-button-secondary:hover {
     padding: 0 !important;
     margin: 0 !important;
     display: flex !important;
-    align-items: center !important;
+    align-items: flex-end !important;
     white-space: nowrap !important;
 }
 
 .input-query-badge {
     background: #ede9fe !important;
     color: #4f46e5 !important;
-    font-size: 0.92rem !important;
+    font-size: 0.82rem !important;
     font-weight: 600 !important;
-    padding: 8px 14px !important;
-    border-radius: 10px !important;
+    padding: 0 12px !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    border-radius: 8px !important;
     white-space: nowrap !important;
     display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
     line-height: 1.2 !important;
     letter-spacing: -0.01em !important;
+    box-sizing: border-box !important;
 }
 
 .query-msg-input,
-.query-msg-input.block {
+.query-msg-input.block,
+.query-msg-input label,
+.query-msg-input .wrap {
     flex: 1 1 0% !important;
     flex-shrink: 1 !important;
     background: transparent !important;
@@ -1169,23 +1324,35 @@ button.secondary:hover, .gr-button-secondary:hover {
     margin: 0 !important;
     min-width: 0 !important;
     width: 100% !important;
+    min-height: 54px !important;
+    height: auto !important;
+    box-sizing: border-box !important;
 }
 
 .query-msg-input input,
 .query-msg-input textarea {
     background: #ffffff !important;
     border: 1px solid #e2e8f0 !important;
-    border-radius: 12px !important;
-    padding: 10px 16px !important;
-    font-size: 0.94rem !important;
+    border-radius: 10px !important;
+    padding: 7px 12px !important;
+    font-size: 0.88rem !important;
     color: #1e293b !important;
     line-height: 1.4 !important;
+    field-sizing: content !important;
+    min-height: 54px !important;
+    height: auto !important;
+    max-height: 240px !important;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02) !important;
     transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
     width: 100% !important;
     min-width: 0 !important;
     box-sizing: border-box !important;
     outline: none !important;
+    resize: none !important;
+    overflow-y: auto !important;
+    scrollbar-width: thin !important;
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
 }
 
 .query-msg-input input:focus,
@@ -1203,15 +1370,17 @@ button.secondary:hover, .gr-button-secondary:hover {
 .query-send-btn,
 button.query-send-btn {
     flex: 0 0 auto !important;
-    width: 95px !important;
-    min-width: 95px !important;
-    max-width: 95px !important;
-    height: 44px !important;
+    width: 85px !important;
+    min-width: 85px !important;
+    max-width: 85px !important;
+    height: 36px !important;
+    min-height: 36px !important;
     background: linear-gradient(135deg, #4f46e5 0%, #2563eb 55%, #0ea5e9 100%) !important;
     color: #ffffff !important;
     font-weight: 600 !important;
-    font-size: 0.96rem !important;
-    border-radius: 12px !important;
+    font-size: 0.88rem !important;
+    line-height: 36px !important;
+    border-radius: 10px !important;
     border: none !important;
     box-shadow: 0 4px 14px rgba(37, 99, 235, 0.28) !important;
     cursor: pointer !important;
@@ -1544,7 +1713,9 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
         with gr.Column(scale=8, elem_classes=["conversation-col"]):
             chatbot = gr.Chatbot(
                 label="Conversation",
-                height=240
+                height=240,
+                elem_id="main-chatbot",
+                elem_classes=["chatbot", "main-chatbot"]
             )
 
             # Ready Options / Quick Chips inside the chatbot frame (Developer Mode only)
@@ -1571,7 +1742,8 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
                         container=False,
                         scale=8,
                         min_width=0,
-                        lines=1,
+                        lines=2,
+                        max_lines=10,
                         elem_classes=["query-msg-input"]
                     )
                     send_btn = gr.Button("Send", variant="primary", scale=0, min_width=95, elem_classes=["query-send-btn"])
