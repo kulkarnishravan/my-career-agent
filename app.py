@@ -30,6 +30,20 @@ PDF_FILE = DATA_DIR / "Shravan Resume Rag feed.pdf"
 RESUME_DOWNLOAD_FILE = DATA_DIR / "Shravan Resume 2026.pdf"
 MAX_QUERY_CHARS = 250
 
+# Candidate contact details for feedback & direct queries
+contact_details_env = os.getenv("CONTACT_DETAILS", "").strip()
+phone_match = re.search(r"Phone:\s*([^\s|]+)", contact_details_env)
+email_match = re.search(r"Email:\s*([^\s|]+)", contact_details_env)
+
+CANDIDATE_PHONE = os.getenv("CANDIDATE_PHONE") or (phone_match.group(1) if phone_match else "9845248064")
+CANDIDATE_EMAIL = os.getenv("CANDIDATE_EMAIL") or (email_match.group(1) if email_match else "shravankulkarni.a@gmail.com")
+
+NO_INFO_FALLBACK_MESSAGE = (
+    "I could not find any relevant information from the documents shared with me. "
+    "Could you please leave it as a feedback to Mr. Shravan? "
+    f"Feel free to call him on his number {CANDIDATE_PHONE} or email to {CANDIDATE_EMAIL}."
+)
+
 
 # ------------------------------------------------------------------------------
 # 2. Vector Store Initialization (Load or Auto-Build)
@@ -146,13 +160,16 @@ def generate_grounded_answer(query: str, context_chunks: list) -> str:
     """
     Sends retrieved chunks and query to OpenAI with strict anti-hallucination instructions.
     """
-    system_prompt = """You are a precise, factual career assistant.
+    if not context_chunks:
+        return NO_INFO_FALLBACK_MESSAGE
+
+    system_prompt = f"""You are a precise, factual career assistant for Shravan A. Kulkarni.
 
 CRITICAL INSTRUCTIONS:
 1. Answer the question STRICTLY using ONLY the information provided in the "Source Material" below.
 2. Do NOT use any outside knowledge, assumptions, extrapolation, or imagination.
 3. If the answer cannot be fully deduced from the provided source material, you MUST state:
-   "Based on the provided source material, this information is not available."
+   "{NO_INFO_FALLBACK_MESSAGE}"
 4. Do not speculate or invent qualifications or details."""
 
     context_text = "\n\n".join([
@@ -381,6 +398,12 @@ def chat_handler(user_message, history, top_k=4):
 
     retrieved_docs = vector_store.similarity_search(user_message, k=int(top_k))
 
+    if not retrieved_docs:
+        history = base_history + [{"role": "assistant", "content": NO_INFO_FALLBACK_MESSAGE}]
+        status_html = render_pipeline_status("complete", "Information Not Found", "No relevant chunks retrieved from vector database.")
+        yield history, status_html, "*No chunks retrieved from vector database.*"
+        return
+
     formatted_sources = "\n\n---\n\n".join([
         f"**Source Chunk {doc.metadata.get('chunk_id', idx + 1)}** *(File: `{doc.metadata.get('source', PDF_FILE.name)}`)*:\n\n{doc.page_content}"
         for idx, doc in enumerate(retrieved_docs)
@@ -417,6 +440,8 @@ light_theme = gr.themes.Soft(
 )
 
 custom_css = """
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Outfit:wght@300;400;500;600;700&display=swap');
+
 /* ── Luminous Ambient Mesh Gradient Background (Not Generic Gradio White/Gray) ── */
 .gradio-container {
     background: radial-gradient(at 0% 0%, rgba(224, 242, 254, 0.85) 0px, transparent 50%),
@@ -424,7 +449,7 @@ custom_css = """
                 radial-gradient(at 50% 100%, rgba(240, 249, 255, 0.8) 0px, transparent 50%),
                 linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%) !important;
     min-height: 100vh;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
     color: #0f172a !important;
 }
 
@@ -451,13 +476,49 @@ custom_css = """
     box-shadow: 0 14px 36px -6px rgba(79, 70, 229, 0.08), 0 4px 10px rgba(15, 23, 42, 0.03) !important;
 }
 
-/* ── Chatbot Glass Canvas & Message Bubbles ── */
+/* ── Chatbot Glass Canvas & Elegant Conversation Typography ── */
 .chatbot {
     background: rgba(255, 255, 255, 0.65) !important;
     backdrop-filter: blur(16px) !important;
     border: 1px solid rgba(226, 232, 240, 0.85) !important;
     border-radius: 18px !important;
     box-shadow: 0 8px 30px rgba(15, 23, 42, 0.04) !important;
+    font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+}
+
+/* Conversation message text: compact, elegant font-size and smooth line-height */
+.chatbot .message,
+.chatbot .message-wrap,
+.chatbot [data-testid="user"],
+.chatbot [data-testid="bot"],
+.chatbot .user,
+.chatbot .bot,
+.chatbot .prose {
+    font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    font-size: 0.86rem !important;
+    line-height: 1.54 !important;
+    letter-spacing: -0.012em !important;
+}
+
+.chatbot .message p,
+.chatbot .message li,
+.chatbot .message span,
+.chatbot .prose p,
+.chatbot .prose li,
+.chatbot .prose span,
+.chatbot [data-testid="user"] p,
+.chatbot [data-testid="bot"] p {
+    font-size: 0.86rem !important;
+    line-height: 1.54 !important;
+    letter-spacing: -0.012em !important;
+}
+
+.chatbot .prose h1, .chatbot .message h1 { font-size: 1.05rem !important; font-weight: 700 !important; margin: 4px 0 !important; }
+.chatbot .prose h2, .chatbot .message h2 { font-size: 0.96rem !important; font-weight: 600 !important; margin: 4px 0 !important; }
+.chatbot .prose h3, .chatbot .message h3 { font-size: 0.90rem !important; font-weight: 600 !important; margin: 3px 0 !important; }
+.chatbot .prose ul, .chatbot .prose ol, .chatbot .message ul, .chatbot .message ol {
+    margin: 4px 0 !important;
+    padding-left: 18px !important;
 }
 
 .chatbot .user, .chatbot [data-testid="user"] {
@@ -466,6 +527,7 @@ custom_css = """
     border: none !important;
     border-radius: 18px 18px 4px 18px !important;
     box-shadow: 0 4px 14px rgba(79, 70, 229, 0.25) !important;
+    font-weight: 450 !important;
 }
 
 .chatbot .user p, .chatbot [data-testid="user"] * {
@@ -478,6 +540,7 @@ custom_css = """
     border: 1px solid rgba(226, 232, 240, 0.9) !important;
     border-radius: 18px 18px 18px 4px !important;
     box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03) !important;
+    font-weight: 400 !important;
 }
 
 /* ── Clean Glass Input & Textarea ── */
@@ -557,12 +620,35 @@ textarea:focus, input[type="text"]:focus {
     transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
 }
 
+.quick-options button.primary,
+.quick-options .gr-button-primary,
+.quick-options a.primary,
+.quick-options-vertical button.primary,
+.quick-options-vertical .gr-button-primary,
+.quick-options-vertical a.primary {
+    background: linear-gradient(135deg, #4f46e5 0%, #0ea5e9 100%) !important;
+    color: #ffffff !important;
+    border: none !important;
+    box-shadow: 0 4px 14px rgba(79, 70, 229, 0.3), 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+}
+
 .quick-options button:hover, .quick-options .gr-button:hover, .quick-options-vertical button:hover, .quick-options-vertical .gr-button:hover {
     transform: translateY(-2px) scale(1.02) !important;
     background: #ffffff !important;
     border-color: #6366f1 !important;
     color: #4f46e5 !important;
     box-shadow: 0 6px 18px rgba(99, 102, 241, 0.18), 0 2px 4px rgba(99, 102, 241, 0.08) !important;
+}
+
+.quick-options button.primary:hover,
+.quick-options .gr-button-primary:hover,
+.quick-options a.primary:hover,
+.quick-options-vertical button.primary:hover,
+.quick-options-vertical .gr-button-primary:hover,
+.quick-options-vertical a.primary:hover {
+    background: linear-gradient(135deg, #4338ca 0%, #0284c7 100%) !important;
+    color: #ffffff !important;
+    box-shadow: 0 8px 22px rgba(79, 70, 229, 0.42), 0 2px 6px rgba(14, 165, 233, 0.25) !important;
 }
 
 .quick-options button:active, .quick-options .gr-button:active, .quick-options-vertical button:active, .quick-options-vertical .gr-button:active {
@@ -1236,6 +1322,7 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
                     size="sm",
                     variant="primary"
                 )
+                opt_jd_match = gr.Button("🎯 JD Match", size="sm", variant="primary")
                 opt_agentic = gr.Button("🤖 Agentic AI Experience", size="sm", variant="secondary")
                 opt_skills = gr.Button("💻 Web Development", size="sm", variant="secondary")
                 opt_edu = gr.Button("🎓 Education", size="sm", variant="secondary")
@@ -1275,6 +1362,7 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
                 size="sm",
                 variant="primary"
             )
+            rec_jd_match = gr.Button("🎯 JD Match", size="sm", variant="primary")
             rec_agentic = gr.Button("🤖 Agentic AI Experience", size="sm", variant="secondary")
             rec_skills = gr.Button("💻 Web Development", size="sm", variant="secondary")
             rec_edu = gr.Button("🎓 Education", size="sm", variant="secondary")
@@ -1373,6 +1461,7 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
         return _handler
 
     quick_options_map = [
+        (opt_jd_match, "Please evaluate Shravan's skills, qualifications, and experience for job role suitability (JD Match analysis)."),
         (opt_agentic, "What experience does Shravan have with Agentic AI and multi-agent frameworks?"),
         (opt_skills, "What are his core technical skills in web development and frontend architecture?"),
         (opt_edu, "What is Shravan's educational background and degrees?")
@@ -1380,7 +1469,7 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
     # Recruiter Mode buttons reuse the same prompts
     quick_options_map += [
         (rec_btn, prompt) for rec_btn, (_, prompt) in zip(
-            [rec_agentic, rec_skills, rec_edu], quick_options_map
+            [rec_jd_match, rec_agentic, rec_skills, rec_edu], quick_options_map
         )
     ]
 
