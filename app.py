@@ -36,7 +36,51 @@ INDEX_DIR = Path(__file__).parent / "faiss_index"
 DATA_DIR = Path(__file__).parent / "data"
 PDF_FILE = DATA_DIR / "Shravan Resume Rag feed.pdf"
 RESUME_DOWNLOAD_FILE = DATA_DIR / "Shravan Resume 2026.pdf"
+IMAGE_FILE = DATA_DIR / "image.png"
 MAX_QUERY_CHARS = 250
+
+if IMAGE_FILE.exists():
+    import base64
+    AVATAR_B64 = base64.b64encode(IMAGE_FILE.read_bytes()).decode("utf-8")
+else:
+    AVATAR_B64 = ""
+
+HERO_BANNER_HTML = f"""
+<div class="hero-banner">
+    <div class="hero-avatar-wrap">
+        <img class="hero-avatar" src="data:image/png;base64,{AVATAR_B64}" alt="Shravan A. Kulkarni" />
+        <span class="avatar-status-beacon" title="System Online & Active"></span>
+    </div>
+    <div class="hero-content">
+        <div class="hero-title-row">
+            <h1 class="hero-name">Shravan A. Kulkarni</h1>
+            <span class="hero-tagline">Career & Resume AI Assistant</span>
+        </div>
+        <div class="hero-pills">
+            <div class="hero-pill status-pill">
+                <span class="pulse-green-dot"></span>
+                <span class="status-pill-text">System Online</span>
+            </div>
+            <div class="hero-pill open-to-work-pill">
+                <span class="pill-icon">💼</span>
+                <span>Open to Work</span>
+            </div>
+            <div class="hero-pill agentic-pill">
+                <span class="pill-icon">🤖</span>
+                <span>Agentic AI Developer</span>
+            </div>
+            <div class="hero-pill ui-pill">
+                <span class="pill-icon">💻</span>
+                <span>Senior UI Developer</span>
+            </div>
+            <div class="hero-pill agile-pill">
+                <span class="pill-icon">⚡</span>
+                <span>Agile / SDLC</span>
+            </div>
+        </div>
+    </div>
+</div>
+"""
 
 # JD Match limits & retrieval tuning
 MIN_JD_CHARS = 200
@@ -294,7 +338,7 @@ CRITICAL INSTRUCTIONS:
    - "partial": a chunk shows related or adjacent experience, but not fully.
    - "missing": NO chunk supports it.
    Before marking anything "missing", scan EVERY chunk for the skill, a synonym, or a closely related term; if any chunk mentions it, it is at least "partial".
-   In "evidence", cite the supporting chunk (e.g. "Chunk 12: ...") or write "Not found in resume".
+   In "evidence", provide concise supporting evidence directly from Shravan's resume (e.g. "Developed full-stack web applications using React and Node.js") or write "Not found in resume". Do NOT mention chunk numbers or chunk IDs.
 4. Do NOT use outside knowledge, assumptions, or extrapolation. Never invent skills, numbers, or experience.
 5. fit_reasons: short bullets on why Shravan fits. gap_reasons: short bullets on where he falls short.
 6. missing_skills: short skill/tool names (1-3 words, e.g. "Kubernetes", "Go") for requirements marked "missing" or "partial". missing_experience: missing experience areas (seniority, domain, years). Never list something as missing that a chunk supports.
@@ -337,6 +381,21 @@ def compute_match_score(requirements: list[Requirement]) -> int:
     return round(earned / max_points * 100)
 
 
+def clean_evidence(evidence: str) -> str:
+    """Strips chunk markers (e.g. 'Chunk 12:', '[Source Chunk 3]:', '(Chunk 5)') from evidence text."""
+    if not evidence:
+        return ""
+    cleaned = re.sub(
+        r"^(?:\[?(?:Source\s+)?Chunk\s*\d+\]?[:\s\-–—]*|\((?:Source\s+)?Chunk\s*\d+\)[:\s\-–—]*)",
+        "",
+        evidence,
+        flags=re.IGNORECASE
+    )
+    cleaned = re.sub(r"\s*[\(\[](?:Source\s+)?Chunk\s*\d+[\)\]]", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*[:\-–—]\s*", "", cleaned)
+    return cleaned.strip()
+
+
 def format_jd_match_markdown(result: JDMatch, score: int) -> str:
     """Renders the JD Match result as a chat-friendly markdown answer."""
     if score >= 75:
@@ -368,7 +427,7 @@ def format_jd_match_markdown(result: JDMatch, score: int) -> str:
     if result.requirements:
         status_icon = {"met": "✅ Met", "partial": "🟡 Partial", "missing": "❌ Missing"}
         rows = "\n".join(
-            f"| {cell(r.skill)} | {'Must' if r.priority == 'must' else 'Nice'} | {status_icon[r.status]} | {cell(r.evidence)} |"
+            f"| {cell(r.skill)} | {'Must' if r.priority == 'must' else 'Nice'} | {status_icon[r.status]} | {cell(clean_evidence(r.evidence))} |"
             for r in result.requirements
         )
         parts.append(
@@ -1262,28 +1321,177 @@ button.secondary:hover, .gr-button-secondary:hover {
 }
 
 .header-main-col .block {
-    padding: 8px 14px !important;
+    padding: 6px 12px !important;
 }
 
-.header-row h1 {
-    margin: 0 0 1px 0 !important;
-    font-size: 1.32rem !important;
+/* ── Trendy Hero Banner ── */
+.hero-banner {
+    display: flex !important;
+    align-items: center !important;
+    gap: 16px !important;
+    padding: 2px 4px !important;
+    width: 100% !important;
+    height: 100% !important;
+    box-sizing: border-box !important;
+}
+
+.hero-avatar-wrap {
+    position: relative !important;
+    flex-shrink: 0 !important;
+    width: 72px !important;
+    height: 72px !important;
+    border-radius: 50% !important;
+    padding: 2.5px !important;
+    background: linear-gradient(135deg, #6366f1 0%, #0ea5e9 50%, #10b981 100%) !important;
+    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.25) !important;
+}
+
+.hero-avatar {
+    width: 100% !important;
+    height: 100% !important;
+    border-radius: 50% !important;
+    object-fit: cover !important;
+    display: block !important;
+    background: #ffffff !important;
+}
+
+.avatar-status-beacon {
+    position: absolute !important;
+    bottom: 2px !important;
+    right: 2px !important;
+    width: 13px !important;
+    height: 13px !important;
+    background: #10b981 !important;
+    border: 2.5px solid #ffffff !important;
+    border-radius: 50% !important;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.8) !important;
+}
+
+.hero-content {
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+}
+
+.hero-title-row {
+    display: flex !important;
+    align-items: baseline !important;
+    gap: 12px !important;
+    flex-wrap: wrap !important;
+}
+
+.hero-name {
+    margin: 0 !important;
+    font-size: 1.35rem !important;
+    font-weight: 800 !important;
+    letter-spacing: -0.025em !important;
+    color: #0f172a !important;
     line-height: 1.15 !important;
-    letter-spacing: -0.02em !important;
 }
 
-.header-row h3 {
-    margin: 0 0 1px 0 !important;
-    font-size: 0.84rem !important;
-    line-height: 1.18 !important;
+.hero-tagline {
+    font-size: 0.78rem !important;
+    font-weight: 500 !important;
+    color: #6366f1 !important;
+    letter-spacing: 0.01em !important;
+}
+
+/* ── Hero Pills Row ── */
+.hero-pills {
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    flex-wrap: wrap !important;
+}
+
+.hero-pill {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 5px !important;
+    padding: 3px 9px !important;
+    border-radius: 9999px !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.01em !important;
+    white-space: nowrap !important;
+    transition: transform 0.15s ease, box-shadow 0.15s ease !important;
+    cursor: default !important;
+}
+
+.hero-pill:hover {
+    transform: translateY(-1px) !important;
+}
+
+.pill-icon {
+    font-size: 0.80rem !important;
+    line-height: 1 !important;
+}
+
+/* Pulsing Green Status Pill */
+.status-pill {
+    background: rgba(16, 185, 129, 0.10) !important;
+    border: 1px solid rgba(16, 185, 129, 0.3) !important;
+    color: #047857 !important;
+    box-shadow: 0 1px 3px rgba(16, 185, 129, 0.08) !important;
+}
+
+@keyframes green-beacon-glow {
+    0% {
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.8), 0 0 5px rgba(16, 185, 129, 0.9);
+    }
+    70% {
+        box-shadow: 0 0 0 6px rgba(16, 185, 129, 0), 0 0 10px rgba(16, 185, 129, 0.9);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0), 0 0 5px rgba(16, 185, 129, 0.9);
+    }
+}
+
+.pulse-green-dot {
+    width: 7px !important;
+    height: 7px !important;
+    border-radius: 50% !important;
+    background: #10b981 !important;
+    display: inline-block !important;
+    animation: green-beacon-glow 1.8s infinite ease-in-out !important;
+}
+
+.status-pill-text {
+    font-weight: 700 !important;
+    letter-spacing: 0.01em !important;
+}
+
+/* Open to work pill */
+.open-to-work-pill {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.14) 0%, rgba(52, 211, 153, 0.25) 100%) !important;
+    border: 1px solid rgba(16, 185, 129, 0.4) !important;
+    color: #065f46 !important;
+    font-weight: 700 !important;
+    box-shadow: 0 1px 4px rgba(16, 185, 129, 0.12) !important;
+}
+
+/* Agentic AI pill */
+.agentic-pill {
+    background: rgba(99, 102, 241, 0.1) !important;
+    border: 1px solid rgba(99, 102, 241, 0.28) !important;
     color: #4338ca !important;
 }
 
-.header-row p {
-    margin: 0 !important;
-    font-size: 0.76rem !important;
-    line-height: 1.15 !important;
-    color: #64748b !important;
+/* UI Developer pill */
+.ui-pill {
+    background: rgba(14, 165, 233, 0.1) !important;
+    border: 1px solid rgba(14, 165, 233, 0.28) !important;
+    color: #0284c7 !important;
+}
+
+/* Agile/SDLC pill */
+.agile-pill {
+    background: rgba(245, 158, 11, 0.1) !important;
+    border: 1px solid rgba(245, 158, 11, 0.28) !important;
+    color: #b45309 !important;
 }
 
 .main-content-row {
@@ -1992,12 +2200,7 @@ button:disabled, .gr-button:disabled {
 with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
     with gr.Row(elem_classes=["header-row"]):
         with gr.Column(scale=8, elem_classes=["header-main-col"]):
-            gr.Markdown(
-                """
-                # 💼 Career & Resume RAG Chatbot
-                *Powered by FAISS, OpenAI GPT-4o, and Strict Grounding Constraints.*
-                """
-            )
+            gr.HTML(HERO_BANNER_HTML, elem_classes=["hero-banner-card"])
         with gr.Column(scale=4, min_width=260, elem_classes=["header-side-col"]):
             mode_toggle = gr.Radio(
                 choices=["Recruiter Mode", "Developer Mode"],
