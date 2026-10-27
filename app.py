@@ -1,6 +1,8 @@
 import os
 import re
 import json
+import html
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 import pypdf
@@ -9,6 +11,8 @@ from openai import OpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail, ReplyTo
 
 # ------------------------------------------------------------------------------
 # 1. Environment & Client Setup
@@ -35,13 +39,16 @@ contact_details_env = os.getenv("CONTACT_DETAILS", "").strip()
 phone_match = re.search(r"Phone:\s*([^\s|]+)", contact_details_env)
 email_match = re.search(r"Email:\s*([^\s|]+)", contact_details_env)
 
-CANDIDATE_PHONE = os.getenv("CANDIDATE_PHONE") or (phone_match.group(1) if phone_match else "9845248064")
+CANDIDATE_PHONE = os.getenv("CANDIDATE_PHONE") or (phone_match.group(1) if phone_match else "")
 CANDIDATE_EMAIL = os.getenv("CANDIDATE_EMAIL") or (email_match.group(1) if email_match else "shravankulkarni.a@gmail.com")
+
+# Only mention the phone number when one is configured via the environment
+contact_options = ([f"call him on his number {CANDIDATE_PHONE}"] if CANDIDATE_PHONE else []) + [f"email to {CANDIDATE_EMAIL}"]
 
 NO_INFO_FALLBACK_MESSAGE = (
     "I could not find any relevant information from the documents shared with me. "
     "Could you please leave it as a feedback to Mr. Shravan? "
-    f"Feel free to call him on his number {CANDIDATE_PHONE} or email to {CANDIDATE_EMAIL}."
+    f"Feel free to {' or '.join(contact_options)}."
 )
 
 
@@ -418,6 +425,78 @@ def chat_handler(user_message, history, top_k=4):
     history = base_history + [{"role": "assistant", "content": answer}]
     status_html = render_pipeline_status("complete", "Complete & Grounded", "Answer verified strictly within source material.")
     yield history, status_html, formatted_sources
+
+
+# ------------------------------------------------------------------------------
+# 6b. Feedback Validation
+# ------------------------------------------------------------------------------
+PHONE_PATTERN = re.compile(r"^\+?[\d\s\-()]{7,20}$")
+EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+
+def validate_feedback(name: str, contact: str, email: str, feedback: str) -> list[str]:
+    """Returns a list of validation errors (empty if the feedback form is valid)."""
+    name, contact, email, feedback = (v.strip() if v else "" for v in (name, contact, email, feedback))
+    errors = []
+    if not name:
+        errors.append("Please enter your name.")
+    if not contact and not email:
+        errors.append("Please provide a contact number or an e-mail address.")
+    if contact:
+        digit_count = len(re.sub(r"\D", "", contact))
+        if not PHONE_PATTERN.match(contact) or not 7 <= digit_count <= 15:
+            errors.append("Please enter a valid contact number (7–15 digits; +, spaces, dashes, brackets allowed).")
+    if email and not EMAIL_PATTERN.match(email):
+        errors.append("Please enter a valid e-mail address (e.g. you@company.com).")
+    if not feedback:
+        errors.append("Please enter your feedback.")
+    return errors
+
+
+# ------------------------------------------------------------------------------
+# 6c. Feedback Delivery via SendGrid
+# ------------------------------------------------------------------------------
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "").strip()
+# The sender must be a verified Single Sender (or domain) in SendGrid
+FEEDBACK_FROM_EMAIL = os.getenv("FEEDBACK_FROM_EMAIL", "").strip() or CANDIDATE_EMAIL
+FEEDBACK_TO_EMAIL = os.getenv("FEEDBACK_TO_EMAIL", "").strip() or CANDIDATE_EMAIL
+
+
+def send_feedback_email(name: str, contact: str, email: str, feedback: str) -> tuple[bool, str]:
+    """Emails the feedback to Shravan via SendGrid. Returns (success, error_detail)."""
+    if not SENDGRID_API_KEY:
+        return False, "SENDGRID_API_KEY is not configured"
+
+    rows = [("Name", name), ("Contact", contact or "—"), ("E-mail", email or "—")]
+    rows_html = "".join(
+        f'<tr><td style="padding:4px 12px 4px 0;color:#64748b;"><b>{label}</b></td><td>{html.escape(value)}</td></tr>'
+        for label, value in rows
+    )
+    body_html = (
+        f'<div style="font-family:Arial,sans-serif;font-size:14px;color:#0f172a;">'
+        f'<h3 style="color:#4338ca;margin:0 0 12px 0;">New feedback from the Resume Chatbot</h3>'
+        f'<table>{rows_html}</table>'
+        f'<p style="margin:16px 0 4px 0;"><b>Feedback:</b></p>'
+        f'<div style="white-space:pre-wrap;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;">'
+        f'{html.escape(feedback)}</div></div>'
+    )
+
+    message = Mail(
+        from_email=FEEDBACK_FROM_EMAIL,
+        to_emails=FEEDBACK_TO_EMAIL,
+        subject=f"Resume Chatbot feedback from {name}",
+        html_content=body_html,
+    )
+    if email:
+        message.reply_to = ReplyTo(email, name)
+
+    try:
+        response = SendGridAPIClient(SENDGRID_API_KEY).send(message)
+    except Exception as exc:  # SendGrid raises HTTPError subclasses for 4xx/5xx
+        return False, f"{type(exc).__name__}: {getattr(exc, 'body', exc)}"
+    if 200 <= response.status_code < 300:
+        return True, ""
+    return False, f"HTTP {response.status_code}: {response.body}"
 
 
 # ------------------------------------------------------------------------------
@@ -1287,6 +1366,161 @@ button:disabled, .gr-button:disabled {
     pointer-events: none !important;
     filter: grayscale(0.4) !important;
 }
+
+/* ── Feedback Dialog: fixed overlay with a centred card ── */
+#feedback-modal {
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 1000 !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 16px !important;
+    margin: 0 !important;
+    max-width: none !important;
+    background: rgba(15, 23, 42, 0.4) !important;
+    backdrop-filter: blur(8px) !important;
+    -webkit-backdrop-filter: blur(8px) !important;
+    border: none !important;
+    outline: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+}
+
+#feedback-modal:not(.hide):not(.hidden) {
+    display: flex !important;
+}
+
+/* Blur the page itself while the dialog is open (backdrop-filter alone is unreliable over glass panels) */
+.gradio-container:has(#feedback-modal:not(.hide):not(.hidden)) .header-row,
+.gradio-container:has(#feedback-modal:not(.hide):not(.hidden)) .main-content-row {
+    filter: blur(6px) !important;
+    pointer-events: none !important;
+    user-select: none !important;
+    transition: filter 0.2s ease !important;
+}
+
+#feedback-dialog {
+    width: 100% !important;
+    max-width: 420px !important;
+    max-height: 90vh !important;
+    overflow-y: auto !important;
+    flex: 0 1 auto !important;
+    display: flex !important;
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    background: #ffffff !important;
+    backdrop-filter: none !important;
+    border: 1px solid rgba(226, 232, 240, 0.95) !important;
+    outline: none !important;
+    border-radius: 16px !important;
+    padding: 16px 18px !important;
+    gap: 8px !important;
+    box-shadow: 0 24px 60px -12px rgba(15, 23, 42, 0.35) !important;
+}
+
+/* Stack every field vertically at full width; strip the inherited glass-card styling */
+#feedback-dialog .form,
+#feedback-dialog .block,
+#feedback-dialog .gradio-row,
+#feedback-dialog .fb-actions {
+    background: transparent !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+#feedback-dialog .form {
+    display: flex !important;
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    gap: 8px !important;
+}
+
+#feedback-dialog .form > *,
+#feedback-dialog > .block {
+    width: 100% !important;
+    min-width: 0 !important;
+    flex: 0 0 auto !important;
+}
+
+#feedback-dialog h3 {
+    margin: 0 0 2px 0 !important;
+    font-size: 0.95rem !important;
+    color: #4338ca !important;
+}
+
+#feedback-dialog label span,
+#feedback-dialog [data-testid="block-info"] {
+    font-size: 0.74rem !important;
+    font-weight: 600 !important;
+    color: #475569 !important;
+    margin-bottom: 3px !important;
+}
+
+#feedback-dialog input,
+#feedback-dialog textarea {
+    font-size: 0.8rem !important;
+    line-height: 1.3 !important;
+    padding: 5px 10px !important;
+    border-radius: 8px !important;
+}
+
+#feedback-dialog input {
+    height: 30px !important;
+    min-height: 30px !important;
+}
+
+#feedback-dialog input::placeholder,
+#feedback-dialog textarea::placeholder {
+    font-size: 0.78rem !important;
+}
+
+.fb-hint p {
+    margin: 0 !important;
+    font-size: 0.72rem !important;
+    color: #64748b !important;
+}
+
+/* Error list: force red on every descendant so the theme's prose colours can't override it */
+.fb-error,
+.fb-error *,
+#feedback-dialog .fb-error-list,
+#feedback-dialog .fb-error-list li {
+    color: #dc2626 !important;
+    font-size: 0.74rem !important;
+}
+
+#feedback-dialog .fb-error-list {
+    margin: 0 !important;
+    padding-left: 16px !important;
+}
+
+#feedback-dialog .fb-error-list li::marker {
+    color: #dc2626 !important;
+}
+
+#feedback-dialog .fb-actions {
+    display: flex !important;
+    flex-direction: row !important;
+    justify-content: flex-end !important;
+    gap: 8px !important;
+    margin-top: 4px !important;
+}
+
+#feedback-dialog .fb-actions button {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 0 !important;
+    height: 28px !important;
+    padding: 0 14px !important;
+    font-size: 0.76rem !important;
+    border-radius: 8px !important;
+}
 """
 
 with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
@@ -1326,6 +1560,7 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
                 opt_agentic = gr.Button("🤖 Agentic AI Experience", size="sm", variant="secondary")
                 opt_skills = gr.Button("💻 Web Development", size="sm", variant="secondary")
                 opt_edu = gr.Button("🎓 Education", size="sm", variant="secondary")
+                opt_feedback = gr.Button("💬 Leave Feedback", size="sm", variant="primary")
 
             with gr.Column(elem_classes=["query-box-card"]):
                 with gr.Row(elem_classes=["query-top-row"]):
@@ -1366,6 +1601,7 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
             rec_agentic = gr.Button("🤖 Agentic AI Experience", size="sm", variant="secondary")
             rec_skills = gr.Button("💻 Web Development", size="sm", variant="secondary")
             rec_edu = gr.Button("🎓 Education", size="sm", variant="secondary")
+            rec_feedback = gr.Button("💬 Leave Feedback", size="sm", variant="primary")
 
         with gr.Column(scale=4, min_width=260, visible=False, elem_classes=["side-panel"]) as inspector_col:
             top_k_slider = gr.Slider(
@@ -1386,6 +1622,21 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
                     value="*Retrieved chunks will appear here after asking a relevant question.*",
                     elem_classes=["sources-box"]
                 )
+
+    # Feedback dialog: a hidden column rendered as a fixed overlay via CSS
+    with gr.Column(visible=False, elem_id="feedback-modal") as feedback_modal:
+        with gr.Column(elem_id="feedback-dialog"):
+            gr.Markdown("### 💬 Leave Feedback for Shravan")
+            fb_name = gr.Textbox(label="Your Name *", max_lines=1)
+            fb_contact = gr.Textbox(label="Contact", placeholder="e.g. 9876543210", max_lines=1)
+            fb_email = gr.Textbox(label="E-mail", placeholder="you@company.com", max_lines=1)
+            gr.Markdown("*Please provide at least one: Contact or E-mail.*", elem_classes=["fb-hint"])
+            fb_text = gr.Textbox(label="Feedback *", lines=5)
+            fb_error = gr.HTML("", elem_classes=["fb-error"])
+            with gr.Row(elem_classes=["fb-actions"]):
+                fb_reset = gr.Button("Reset", variant="secondary", size="sm", scale=0, min_width=0)
+                fb_cancel = gr.Button("Cancel", variant="secondary", size="sm", scale=0, min_width=0)
+                fb_submit = gr.Button("Submit Feedback", variant="primary", size="sm", scale=0, min_width=0)
 
     # Event handlers
     def on_mode_change(mode):
@@ -1480,6 +1731,54 @@ with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
             outputs=[chatbot, status_box, sources_box, msg_input, btn],
             show_progress="hidden"
         )
+
+    # Feedback dialog handlers
+    feedback_outputs = [feedback_modal, fb_name, fb_contact, fb_email, fb_text, fb_error]
+
+    def open_feedback():
+        return gr.update(visible=True), ""
+
+    def reset_feedback():
+        return "", "", "", "", ""
+
+    def close_feedback():
+        return gr.update(visible=False), *reset_feedback()
+
+    def submit_feedback(name, contact, email, feedback):
+        errors = validate_feedback(name, contact, email, feedback)
+        if errors:
+            error_html = '<ul class="fb-error-list">' + "".join(f"<li>{e}</li>" for e in errors) + "</ul>"
+            return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), error_html
+
+        name, contact, email, feedback = name.strip(), contact.strip(), email.strip(), feedback.strip()
+        print(
+            f"[FEEDBACK {datetime.now().isoformat(timespec='seconds')}] "
+            f"name={name!r} contact={contact!r} email={email!r}\n{feedback}"
+        )
+
+        sent, error_detail = send_feedback_email(name, contact, email, feedback)
+        if not sent:
+            print(f"[FEEDBACK] SendGrid delivery failed: {error_detail}")
+            error_html = (
+                '<ul class="fb-error-list"><li>Sorry, your feedback could not be sent right now. '
+                f"Please try again later or e-mail {html.escape(CANDIDATE_EMAIL)} directly.</li></ul>"
+            )
+            return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), error_html
+
+        gr.Info("Thank you! Your feedback has been sent to Shravan.")
+        return close_feedback()
+
+    for btn in (rec_feedback, opt_feedback):
+        btn.click(fn=open_feedback, outputs=[feedback_modal, fb_error], show_progress="hidden")
+
+    fb_reset.click(fn=reset_feedback, outputs=feedback_outputs[1:], show_progress="hidden")
+    fb_cancel.click(fn=close_feedback, outputs=feedback_outputs, show_progress="hidden")
+    fb_submit.click(
+        fn=submit_feedback,
+        inputs=[fb_name, fb_contact, fb_email, fb_text],
+        outputs=feedback_outputs,
+        show_progress="hidden"
+    )
 
 
 if __name__ == "__main__":
