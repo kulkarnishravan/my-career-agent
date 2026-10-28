@@ -2195,6 +2195,208 @@ button:disabled, .gr-button:disabled {
 #jd-dialog {
     max-width: 640px !important;
 }
+
+/* ── Responsive: Tablet & Phone ── */
+@media (max-width: 768px) {
+    .gradio-container,
+    #app-container {
+        padding: 8px !important;
+    }
+
+    /* Stack header and main content columns full width */
+    .header-row,
+    .main-content-row {
+        flex-direction: column !important;
+        flex-wrap: nowrap !important;
+        align-items: stretch !important;
+        gap: 10px !important;
+    }
+
+    .header-main-col,
+    .header-side-col,
+    .conversation-col,
+    .side-panel {
+        flex: 1 1 auto !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+    }
+
+    .block, .form, .gradio-row, .gr-panel, .gr-box {
+        backdrop-filter: blur(8px) !important;
+        -webkit-backdrop-filter: blur(8px) !important;
+    }
+
+    /* Hero banner */
+    .hero-banner { gap: 12px !important; }
+    .hero-avatar-wrap { width: 56px !important; height: 56px !important; }
+    .avatar-status-beacon { width: 11px !important; height: 11px !important; }
+    .hero-name { font-size: 1.1rem !important; }
+    .hero-title-row { gap: 2px 10px !important; }
+    .hero-pill { font-size: 0.68rem !important; padding: 2px 8px !important; }
+
+    /* Recruiter quick options: 2-column grid below the conversation */
+    .quick-options-vertical {
+        display: grid !important;
+        grid-template-columns: 1fr 1fr !important;
+        gap: 8px !important;
+    }
+
+    .quick-options-vertical > :first-child {
+        grid-column: 1 / -1 !important;
+    }
+
+    .quick-options-vertical button,
+    .quick-options-vertical .gr-button,
+    .quick-options-vertical a {
+        padding: 8px 10px !important;
+        font-size: 12.5px !important;
+        white-space: normal !important;
+        line-height: 1.2 !important;
+        min-height: 38px !important;
+    }
+
+    /* Developer quick chips: tighter */
+    .quick-options button, .quick-options .gr-button {
+        padding: 6px 12px !important;
+        font-size: 12px !important;
+    }
+
+    /* Taller chat area */
+    #main-chatbot,
+    #main-chatbot > .wrapper,
+    #main-chatbot [class*="bubble-wrap"] {
+        height: 55vh !important;
+        min-height: 320px !important;
+        max-height: none !important;
+    }
+
+    /* Bubbles use full width; wide tables scroll inside the bubble */
+    #main-chatbot [data-testid="bot"],
+    #main-chatbot [data-testid="user"] {
+        max-width: 100% !important;
+        overflow-x: auto !important;
+    }
+
+    #main-chatbot table {
+        display: block !important;
+        max-width: 100% !important;
+        overflow-x: auto !important;
+    }
+
+    #main-chatbot th,
+    #main-chatbot td {
+        min-width: 90px;
+    }
+
+    /* Query bar: drop the badge, give the textarea the room */
+    .input-query-badge-wrap,
+    .input-query-badge-wrap.block {
+        display: none !important;
+    }
+
+    .query-send-btn,
+    button.query-send-btn {
+        width: 64px !important;
+        min-width: 64px !important;
+        max-width: 64px !important;
+        height: 40px !important;
+        min-height: 40px !important;
+    }
+
+    .query-msg-input,
+    .query-msg-input.block,
+    .query-msg-input label,
+    .query-msg-input .wrap,
+    .query-msg-input input,
+    .query-msg-input textarea {
+        min-height: 44px !important;
+    }
+
+    /* Bottom row: Clear Chat (left) and counter (right) */
+    .query-bottom-spacer-wrap,
+    .query-bottom-spacer-wrap.block {
+        display: none !important;
+    }
+
+    .query-clear-btn,
+    button.query-clear-btn,
+    .query-clear-btn button {
+        min-width: 0 !important;
+        padding: 2px 16px !important;
+        font-size: 0.8rem !important;
+        margin: 0 !important;
+    }
+
+    .char-counter { font-size: 0.78rem !important; }
+
+    /* Pipeline status pills wrap two per row */
+    .pipeline-track { flex-wrap: wrap !important; }
+    .pipeline-pill { flex: 1 1 45% !important; }
+
+    .sources-box { max-height: 300px; overflow-wrap: anywhere; }
+
+    /* 16px inputs stop iOS from zooming on focus */
+    textarea,
+    input[type="text"],
+    .query-msg-input input,
+    .query-msg-input textarea,
+    #feedback-dialog input,
+    #jd-dialog input,
+    #feedback-dialog textarea,
+    #jd-dialog textarea {
+        font-size: 16px !important;
+    }
+
+    /* Dialogs fill the small screen */
+    #feedback-modal,
+    #jd-modal {
+        padding: 8px !important;
+    }
+
+    #feedback-dialog,
+    #jd-dialog {
+        max-height: 92vh !important;
+        padding: 14px !important;
+    }
+
+    #feedback-dialog .fb-actions,
+    #jd-dialog .fb-actions {
+        flex-wrap: wrap !important;
+    }
+
+    #feedback-dialog .fb-actions button,
+    #jd-dialog .fb-actions button {
+        height: 36px !important;
+    }
+}
+
+/* ── Responsive: Small Phones ── */
+@media (max-width: 420px) {
+    .hero-tagline { display: none !important; }
+    .ui-pill, .agile-pill { display: none !important; }
+
+    #main-chatbot,
+    #main-chatbot *,
+    #main-chatbot p,
+    #main-chatbot li,
+    #main-chatbot span {
+        font-size: 0.8rem !important;
+    }
+
+    #main-chatbot .prose h3 { font-size: 0.86rem !important; }
+}
+
+/* ── Touch devices: no sticky hover lift after a tap ── */
+@media (hover: none) {
+    .quick-options button:hover, .quick-options .gr-button:hover,
+    .quick-options-vertical button:hover, .quick-options-vertical .gr-button:hover,
+    button.primary:hover, .gr-button-primary:hover,
+    .query-send-btn:hover:not(:disabled),
+    .hero-pill:hover {
+        transform: none !important;
+    }
+}
 """
 
 with gr.Blocks(title="Career & Resume RAG Assistant") as demo:
